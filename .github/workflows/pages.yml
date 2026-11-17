@@ -1,0 +1,63 @@
+name: Deploy GPT-2 lab to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/configure-pages@v5
+      - uses: actions/cache@v5
+        id: weights
+        with:
+          path: gpt2/q8-v1
+          key: gpt2-openai-124m-2060c885-${{ hashFiles('pack_gpt2.py', 'read_openai_checkpoint.py') }}
+      - uses: actions/setup-python@v5
+        if: steps.weights.outputs.cache-hit != 'true'
+        with:
+          python-version: '3.12'
+      - name: Download and pack the original GPT-2 checkpoint
+        if: steps.weights.outputs.cache-hit != 'true'
+        run: |
+          source=https://openaipublic.blob.core.windows.net/gpt-2/models/124M
+          checkpoint="${RUNNER_TEMP}/openai-gpt2"
+          mkdir -p "$checkpoint"
+          curl --fail --location --retry 4 --max-time 360 --output "$checkpoint/model.ckpt.index" "$source/model.ckpt.index"
+          curl --fail --location --retry 4 --max-time 360 --output "$checkpoint/model.ckpt.data-00000-of-00001" "$source/model.ckpt.data-00000-of-00001"
+          (cd "$checkpoint" && sha256sum --check <<'SUMS'
+          71916f763f9746f9b2a06b12d91996cf1084ae008d0424543d39391c5f2dc687  model.ckpt.index
+          2060c885360cc0cf41d7a6dbc4d24b5127aae20260c8b5ae521b5a6578407118  model.ckpt.data-00000-of-00001
+          SUMS
+          )
+          python -m pip install numpy==2.3.5
+          python pack_gpt2.py "$checkpoint/model.ckpt.index" gpt2/q8-v1
+      - name: Assemble the static site
+        run: |
+          node build.mjs
+          mkdir -p _site/gpt2
+          cp index.html app.js engine.js gpt2-tokenizer.js gpt2-runtime.js gpt2-worker.js _site/
+          cp gpt2/LICENSE gpt2/tokenizer.json _site/gpt2/
+          cp -r gpt2/q8-v1 _site/gpt2/
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+      - uses: actions/deploy-pages@v4
+        id: deploy
