@@ -2,38 +2,71 @@ import { WIDTH, LAYERS, HEADS, HEAD_WIDTH, VOCAB_SIZE, projectAttention, splitQK
 
 const MODEL_URL = new URL('./gpt2/q8-v1/', import.meta.url);
 const FLOATS = Float32Array.BYTES_PER_ELEMENT;
+const RANGE_BYTES = 4 * 1024 * 1024;
 
-async function fetchChecked(fetcher, url) {
-  const response = await fetcher(url, { cache: 'force-cache' });
+async function fetchChecked(fetcher, url, options) {
+  const response = await fetcher(url, { cache: 'force-cache', ...options });
   if (!response.ok) throw new Error(`资源响应 HTTP ${response.status}（${url.pathname.split('/').at(-1)}）`);
   return response;
 }
 
-async function readShard(shard, fetcher, advance) {
-  const response = await fetchChecked(fetcher, new URL(shard.file, MODEL_URL));
-  const bytes = new Uint8Array(shard.bytes);
-  let length = 0;
+async function readPartition(response, bytes, start, end, advance, file) {
+  let offset = start;
   if (response.body) {
     const reader = response.body.getReader();
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      if (length + value.length > bytes.length) {
+      if (offset + value.length > end) {
         await reader.cancel();
-        throw new Error(`权重长度有误（${shard.file}）`);
+        throw new Error(`权重长度有误（${file}）`);
       }
-      bytes.set(value, length);
-      length += value.length;
+      bytes.set(value, offset);
+      offset += value.length;
       advance(value.length);
     }
   } else {
     const part = new Uint8Array(await response.arrayBuffer());
-    if (part.length > bytes.length) throw new Error(`权重长度有误（${shard.file}）`);
-    bytes.set(part);
-    length = part.length;
-    advance(length);
+    if (part.length > end - start) throw new Error(`权重长度有误（${file}）`);
+    bytes.set(part, offset);
+    offset += part.length;
+    advance(part.length);
   }
-  if (length !== bytes.length) throw new Error(`权重下载不完整（${shard.file}）`);
+  if (offset !== end) throw new Error(`权重下载不完整（${file}）`);
+}
+
+async function readShard(shard, fetcher, advance) {
+  const url = new URL(shard.file, MODEL_URL);
+  const bytes = new Uint8Array(shard.bytes);
+  const range = (start, end) => fetchChecked(fetcher, url, {
+    headers: { Range: `bytes=${start}-${end - 1}` },
+  });
+  const readRange = (response, start, end) => {
+    if (response.status !== 206 || response.headers.get('content-range') !== `bytes ${start}-${end - 1}/${bytes.length}`) {
+      throw new Error(`权重分段有误（${shard.file}）`);
+    }
+    return readPartition(response, bytes, start, end, advance, shard.file);
+  };
+
+  const firstEnd = Math.min(RANGE_BYTES, bytes.length);
+  const first = await range(0, firstEnd);
+  if (first.status === 200) {
+    // Static development servers may respond with the entire file.
+    await readPartition(first, bytes, 0, bytes.length, advance, shard.file);
+  } else {
+    let next = firstEnd;
+    await Promise.all([
+      readRange(first, 0, firstEnd),
+      ...Array.from({ length: 3 }, async () => {
+        while (next < bytes.length) {
+          const start = next;
+          const end = Math.min(start + RANGE_BYTES, bytes.length);
+          next = end;
+          await readRange(await range(start, end), start, end);
+        }
+      }),
+    ]);
+  }
   const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
   const hex = Array.from(hash, value => value.toString(16).padStart(2, '0')).join('');
   if (hex !== shard.sha256) throw new Error(`权重校验失败（${shard.file}）`);
