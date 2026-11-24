@@ -1,5 +1,7 @@
 import { PROMPT, MAX_NEW, WIDTH, LAYERS, HEADS, HEAD_WIDTH, VOCAB_SIZE, viewAttention, distribution, randomAt, choose } from './engine.js';
 import { GPT2Tokenizer, EOS } from './gpt2-tokenizer.js';
+import { modelJSON, hasCachedGPT2 } from './gpt2-cache.js';
+import { createFlow } from './flow.js';
 
 const byId = id => document.getElementById(id);
 const pad = n => String(n).padStart(2, '0');
@@ -33,30 +35,6 @@ const stages = [
   ['候选概率与采样', '温度 → Softmax → 筛选 → 选择', '用温度缩放 logits，再计算全词表概率。采样策略决定保留哪些候选，以及怎样从中选出一个 token。'],
   ['拼接与循环生成', '追加 → 再推理 / 停止', '把生成的 token 追加到序列，拼回字节并解码为文本。遇到 EOS 或达到步数上限时停止。'],
 ];
-
-function drawHero() {
-  const canvas = byId('flow-art');
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  ctx.clearRect(0, 0, 570, 260);
-  const points = [[22, 134], [193, 110], [269, 136], [380, 137], [491, 135], [562, 127]];
-  for (let lane = 0; lane < 8; lane++) {
-    const trace = points.map(([x, y], i) => [x, y + (lane - 3.5) * [22, 14, 8, 8, 13, 18][i]]);
-    ctx.beginPath();
-    ctx.strokeStyle = `rgba(${lane % 2 ? '142,223,194' : '109,162,175'},${lane === 4 ? '.76' : '.28'})`;
-    ctx.lineWidth = lane === 4 ? 2 : 1;
-    ctx.moveTo(...trace[0]);
-    trace.slice(1).forEach(([x, y], i) => {
-      const [previousX, previousY] = trace[i];
-      const mid = (previousX + x) / 2;
-      ctx.bezierCurveTo(mid, previousY, mid, y, x, y);
-    });
-    ctx.stroke();
-  }
-  [[68, 55], [222, 114], [340, 143], [449, 132], [545, 204], [109, 215]].forEach(([x, y]) => {
-    ctx.beginPath(); ctx.fillStyle = '#83d3b7'; ctx.arc(x, y, 2, 0, Math.PI * 2); ctx.fill();
-  });
-}
 
 function choiceButtons(items, key, current) {
   return `<div class="segmented">${items.map(([name, value]) => `<button type="button" data-${key}="${value}" aria-pressed="${value === current}">${name}</button>`).join('')}</div>`;
@@ -318,6 +296,54 @@ function render() {
   renderNav();
   renderConsole();
   renderStage();
+  renderOverview();
+}
+
+const updateDiagram = createFlow({
+  layers: LAYERS,
+  heads: HEADS,
+  pickRow(row) {
+    state.row = row;
+    renderStage();
+    renderOverview();
+  },
+  selectLayer(layer) {
+    state.layer = layer;
+    renderStage();
+    renderOverview();
+  },
+  selectHead(head) {
+    state.head = head;
+    renderStage();
+    renderOverview();
+  },
+  openStage(stage) {
+    go(stage);
+    byId('stage-title').setAttribute('tabindex', '-1');
+    byId('stage-title').focus();
+  },
+});
+
+function renderOverview() {
+  const round = selectedRound();
+  const length = round.length || 12;
+  const start = Math.min(state.row, Math.max(0, length - 12));
+  const tokens = Array.from({ length: Math.min(12, length - start) }, (_, i) => {
+    const id = state.ids[start + i];
+    return { id, name: id === undefined ? '–' : (showToken(id) || '空格') };
+  });
+  let weights;
+  let candidates = [];
+  if (round.logits) {
+    const qkv = state.activations.slice(0, length).map(row => row.layers[state.layer].qkv);
+    weights = viewAttention(qkv, state.head).probabilities;
+    const ranked = distribution(round.logits, round.config);
+    const chosen = round.chosen ?? choose(ranked, randomAt(round.config.seed, state.round));
+    const top = ranked.slice(0, 6);
+    if (!top.some(row => row.id === chosen)) top.push(ranked.find(row => row.id === chosen));
+    candidates = top.map(row => ({ name: showToken(row.id) || '空格', prob: row.prob, picked: row.id === chosen, kept: row.keep }));
+  }
+  updateDiagram({ tokens, start, length, selected: state.row, layer: state.layer, head: state.head, round: state.round + 1, weights, candidates });
 }
 
 function go(stage, scroll = false) {
@@ -386,7 +412,7 @@ document.addEventListener('click', event => {
   if (data.stage !== undefined) go(+data.stage, true);
   if (data.round !== undefined) { selectRound(+data.round); restoreFocus(button); }
   if (data.view !== undefined) { state.tabs[state.stage] = +data.view; renderStage(); restoreFocus(button); }
-  if (data.token !== undefined) { state.row = +data.token; renderStage(); restoreFocus(button); }
+  if (data.token !== undefined) { state.row = +data.token; renderStage(); renderOverview(); restoreFocus(button); }
   if (data.load !== undefined) loadModel();
   if (data.listPrev || data.listNext) {
     const key = data.listPrev || data.listNext;
@@ -405,6 +431,7 @@ document.addEventListener('click', event => {
       card.querySelector('.active-row')?.classList.remove('active-row');
       button.closest('tr').classList.add('active-row');
       if ([2, 5, 7].includes(state.stage)) updateSelectedMetrics();
+      renderOverview();
     }
   }
 });
@@ -427,6 +454,7 @@ byId('stage-tools').addEventListener('change', ({ target }) => {
   if (!key) return;
   state[key] = Number(target.value);
   renderStage();
+  renderOverview();
   byId(target.id).focus({ preventScroll: true });
 });
 byId('stage-content').addEventListener('change', ({ target }) => {
@@ -439,12 +467,11 @@ byId('stage-content').addEventListener('change', ({ target }) => {
 });
 
 let tokenizerPromise;
+let modelPersisted = false;
 function ensureTokenizer() {
   if (tokenizer) return Promise.resolve();
   if (!tokenizerPromise) tokenizerPromise = (async () => {
-    const data = await fetch(new URL('./gpt2/tokenizer.json', import.meta.url), { cache: 'force-cache' });
-    if (!data.ok) throw new Error(`分词器读取失败（HTTP ${data.status}）`);
-    tokenizer = new GPT2Tokenizer(await data.json());
+    tokenizer = new GPT2Tokenizer(await modelJSON(new URL('./gpt2/tokenizer.json', import.meta.url)));
     promptIds = tokenizer.encode(PROMPT);
     state.ids = promptIds.slice();
     state.row = Math.max(promptIds.length - 1, 0);
@@ -465,9 +492,12 @@ function status(message, fraction = null) {
 }
 
 function showProgress(progress) {
-  if (progress.phase === 'download') {
+  if (progress.phase === 'ready') {
+    modelPersisted = progress.persisted;
+  } else if (progress.phase === 'download' || progress.phase === 'restore') {
     const megabytes = amount => (amount / 1e6).toFixed(1);
-    status(`正在下载权重 · ${megabytes(progress.loaded)} / ${megabytes(progress.total)} MB`, progress.loaded / progress.total);
+    const action = progress.phase === 'restore' ? '正在读取本机缓存' : '正在下载并保存权重';
+    status(`${action} · ${megabytes(progress.loaded)} / ${megabytes(progress.total)} MB`, progress.loaded / progress.total);
   } else {
     status(`正在处理输入 · ${progress.done} / ${progress.total} 个 token`, progress.done / progress.total);
   }
@@ -511,11 +541,7 @@ async function prefill() {
   const result = await askWorker('prefill', promptIds);
   state.activations = result.rows;
   state.logits = result.logits;
-  const first = distribution(result.logits, initialConfig());
-  const artLabel = label(first[0].id);
-  byId('art-next').textContent = artLabel.length <= 9 ? artLabel : artLabel.slice(0, 7) + '…';
-  document.querySelectorAll('.art-bars i').forEach((bar, i) => { bar.style.height = `${Math.max(5, first[i].prob * 100)}%`; });
-  status('权重已加载。选择解码层和注意力头，或从控制台逐个生成 token。');
+  status(modelPersisted ? '模型已就绪并保存到本机，后续打开将自动恢复。' : '模型已就绪。浏览器未能保存完整缓存，下次打开可再次加载。');
 }
 
 async function loadModel() {
@@ -596,6 +622,7 @@ byId('seed').addEventListener('change', event => {
 });
 byId('sample-link').addEventListener('click', event => { event.preventDefault(); go(10, true); });
 
-drawHero();
 render();
-ensureTokenizer().catch(error => status(`${error.message}。点击「加载 GPT‑2」重试。`));
+ensureTokenizer().then(async () => {
+  if (await hasCachedGPT2()) await loadModel();
+}).catch(error => status(`${error.message}。点击「加载 GPT‑2」重试。`));

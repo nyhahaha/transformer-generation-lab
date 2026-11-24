@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="用真实 GPT-2 Small 预训练权重，逐步查看“你叫什么名字”如何经过 Transformer 解码器。">
-  <meta name="theme-color" content="#111d24">
+  <meta name="theme-color" content="#ffffff">
   <title>Transformer 生成实验室</title>
   <style>/* INLINE_STYLE */</style>
 </head>
@@ -12,45 +12,51 @@
   <a class="skip" href="#lab">跳到实验区</a>
   <header class="top">
     <div class="shell top-inner">
-      <a href="#top" class="brand" aria-label="Transformer 生成实验室首页"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span> Transformer<span class="brand-sub">生成实验室</span></a>
-      <nav aria-label="站内导航"><a class="nav-active" href="#lab">推理实验</a><a href="#references">参考资料 <span aria-hidden="true">↗</span></a></nav>
+      <a href="#top" class="brand" aria-label="Transformer 生成实验室首页"><span>Transformer</span><span class="brand-sub">生成实验室</span></a>
+      <nav aria-label="站内导航"><a href="#flow">推理图</a><a href="#lab">逐步查看</a><a href="#references">参考资料</a></nav>
     </div>
   </header>
   <main id="top">
-    <section class="hero" aria-labelledby="title">
-      <div class="shell hero-inner">
-        <div class="hero-copy">
-          <div class="eyebrow"><span></span> GPT‑2 SMALL / 124M</div>
-          <h1 id="title">一句话如何<br>变成<span>下一段文字</span>？</h1>
-          <p>从「你叫什么名字」出发，观察 GPT‑2 的 12 层解码器如何逐个生成 token。</p>
-          <a class="hero-link" href="#lab">开始逐步查看 <span aria-hidden="true">↓</span></a>
+    <section class="shell flow-section" id="flow" aria-labelledby="title">
+      <div class="flow-heading">
+        <div><h1 id="title">GPT‑2 推理图</h1><p>沿着 token 的路径查看嵌入、注意力和输出概率。</p></div>
+        <div class="flow-toolbar">
+          <div class="flow-input"><span>固定输入</span><strong>你叫什么名字</strong></div>
+          <div class="flow-temperature"><div><label for="temperature">温度 T</label><output id="temperature-value" for="temperature">1.0</output></div><input id="temperature" type="range" min="0.2" max="2" step="0.1" value="1"></div>
+          <label class="flow-sampling">采样策略<select id="method"><option value="greedy">贪心</option><option value="top-k">Top-k</option><option value="top-p">Top-p</option></select></label>
+          <button type="button" id="generate" class="button primary">生成 1 个 token</button>
         </div>
-        <div class="hero-figure" aria-label="输入序列经过 12 层解码器，得到下一个 token 的概率分布" role="img">
-          <canvas id="flow-art" width="570" height="260" aria-hidden="true"></canvas>
-          <div class="art-label art-input"><small>输入文本</small><div><b>你</b><b>叫</b><b>什</b><b>么</b><b>名</b><b>字</b></div></div>
-          <div class="art-block art-b1"><span aria-hidden="true">▥</span><small>解码层</small><strong>01</strong></div>
-          <div class="art-block art-b2"><span aria-hidden="true">▥</span><small>解码层</small><strong>12</strong></div>
-          <div class="art-output"><small>下一个 token</small><strong id="art-next">?</strong><div class="art-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div></div>
-          <div class="art-caption">输入文本 <i></i> 12 层解码 <i></i> 输出概率</div>
+      </div>
+      <div class="model-bar" aria-label="模型加载">
+        <div class="model-information"><strong id="model-title">GPT‑2 Small</strong><p id="model-message" aria-live="polite">首次下载约 128 MB 并保存到本机，后续打开自动恢复。模型在浏览器本地推理。</p>
+          <progress id="model-progress" hidden max="1" value="0" aria-label="模型加载进度"></progress>
         </div>
+        <button type="button" class="button quiet" id="load-model">加载 GPT‑2</button>
+      </div>
+      <div class="flow-frame">
+        <div class="flow-controls">
+          <div><label for="flow-layer">解码层</label><select id="flow-layer"></select><label for="flow-head">注意力头</label><select id="flow-head"></select></div>
+          <span id="flow-mode">结构预览</span>
+        </div>
+        <div class="flow-scroll" tabindex="0" role="region" aria-label="推理图，可横向滚动">
+          <div class="flow-board">
+            <canvas id="flow-art" aria-hidden="true"></canvas>
+            <div class="flow-column"><button class="flow-title" type="button" data-flow-stage="1">输入嵌入</button><div id="flow-tokens" class="flow-lanes"></div></div>
+            <div class="flow-column"><button class="flow-title" type="button" data-flow-stage="3">Q / K / V 投影</button><div id="flow-projections" class="flow-lanes" aria-hidden="true"></div></div>
+            <div class="flow-column flow-attention"><button class="flow-title" type="button" data-flow-stage="5">多头自注意力</button><div class="flow-matrix-panel"><div class="flow-key-label">K · 键位置</div><div id="flow-grid"></div><div class="flow-query-label">Q · 查询位置</div></div></div>
+            <div class="flow-column"><button class="flow-title" type="button" data-flow-stage="8">前馈网络</button><div id="flow-mlp" class="flow-lanes" aria-hidden="true"></div></div>
+            <div class="flow-column"><button class="flow-title" type="button" data-flow-stage="10">输出概率</button><div id="flow-output"></div></div>
+          </div>
+        </div>
+        <div class="flow-caption"><div class="flow-legend"><span class="query">Q 查询</span><span class="key">K 键</span><span class="value">V 值</span><span class="masked-key">因果遮罩</span></div><p id="flow-insight" aria-live="polite"></p></div>
       </div>
     </section>
 
     <section class="shell lab" id="lab" aria-labelledby="lab-title">
       <header class="lab-heading">
-        <div><h2 id="lab-title">推理工作台</h2><p>选择左侧步骤，查看同一轮推理中每一步的中间值。</p></div>
-        <button type="button" id="reset" class="button quiet"><span aria-hidden="true">↻</span> 重置实验</button>
+        <div><h2 id="lab-title">逐步查看计算</h2><p><span id="prompt-count">字节级 BPE</span> · 选择一个步骤查看中间值。</p></div>
+        <button type="button" id="reset" class="button quiet">重置实验</button>
       </header>
-      <div class="prompt-bar">
-        <div class="prompt-text"><span class="prompt-icon" aria-hidden="true">›_</span><div><small>固定输入</small><strong>你叫什么名字</strong></div></div>
-        <div class="prompt-meta"><span id="prompt-count">字节级 BPE</span><span>12 层 · 每层 12 头</span><span>预训练 GPT‑2</span></div>
-      </div>
-      <div class="model-bar" aria-label="模型加载">
-        <div class="model-information"><strong id="model-title">GPT‑2 Small</strong><p id="model-message" aria-live="polite">首次加载约 129 MB。分词可立即查看，模型在浏览器本地推理。</p>
-          <progress id="model-progress" hidden max="1" value="0" aria-label="模型加载进度"></progress>
-        </div>
-        <button type="button" class="button primary" id="load-model">加载 GPT‑2 <span aria-hidden="true">↓</span></button>
-      </div>
       <div class="workbench">
         <aside class="stage-sidebar" aria-label="推理流程">
           <div class="side-heading"><strong>推理流程</strong><span id="step-count">01 / 12</span></div>
@@ -68,16 +74,11 @@
             <p class="console-label">续写 <span id="generation-count">0 个 token</span></p>
             <div id="decoded-reply" class="decoded-reply" aria-live="polite"></div>
             <div id="generated" class="generated" aria-live="polite"></div>
-            <div class="generate-actions"><button type="button" id="generate" class="button primary">生成 1 个 token <span aria-hidden="true">→</span></button><button type="button" id="run" class="button quiet">运行到结束 <span aria-hidden="true">⇥</span></button></div>
+            <div class="generate-actions"><button type="button" id="run" class="button quiet">运行到结束</button></div>
             <div class="round-controls"><label for="round">查看推理轮次</label><select id="round"></select></div>
           </section>
           <section class="settings">
-            <h3>采样设置</h3>
-            <label for="method">策略</label>
-            <select id="method"><option value="greedy">贪心（取最高概率）</option><option value="top-k">Top-k</option><option value="top-p">Top-p</option></select>
-            <div class="slider-label"><label for="temperature">温度 T</label><output id="temperature-value" for="temperature">1.0</output></div>
-            <input id="temperature" type="range" min="0.2" max="2" step="0.1" value="1">
-            <div class="range-ends"><span>更集中</span><span>更均匀</span></div>
+            <h3>采样详情</h3>
             <div id="method-settings" hidden>
               <div class="slider-label"><label id="threshold-label" for="threshold"></label><output id="threshold-value" for="threshold"></output></div>
               <input id="threshold" type="range">

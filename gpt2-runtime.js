@@ -1,7 +1,7 @@
 import { WIDTH, LAYERS, HEADS, HEAD_WIDTH, VOCAB_SIZE, projectAttention, splitQKV } from './engine.js';
+import { cachedResponse, saveResponse, forgetResponse, modelJSON, shardCacheURL } from './gpt2-cache.js';
 
 const MODEL_URL = new URL('./gpt2/q8-v1/', import.meta.url);
-const FLOATS = Float32Array.BYTES_PER_ELEMENT;
 const RANGE_BYTES = 4 * 1024 * 1024;
 
 async function fetchChecked(fetcher, url, options) {
@@ -35,10 +35,32 @@ async function readPartition(response, bytes, start, end, advance, file) {
   if (offset !== end) throw new Error(`权重下载不完整（${file}）`);
 }
 
-async function readShard(shard, fetcher, advance) {
+async function verified(bytes, shard) {
+  if (bytes.byteLength !== shard.bytes) return false;
+  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  const hex = Array.from(hash, value => value.toString(16).padStart(2, '0')).join('');
+  return hex === shard.sha256;
+}
+
+async function readShard(shard, fetcher, advance, restored) {
   const url = new URL(shard.file, MODEL_URL);
+  const cacheURL = shardCacheURL(MODEL_URL, shard);
+  const saved = await cachedResponse(cacheURL);
+  if (saved) {
+    try {
+      const bytes = new Uint8Array(await saved.arrayBuffer());
+      if (await verified(bytes, shard)) {
+        restored(bytes.length);
+        return { bytes, saved: true };
+      }
+    } catch {
+      // A damaged cached response is replaced from the original source.
+    }
+    await forgetResponse(cacheURL);
+  }
   const bytes = new Uint8Array(shard.bytes);
   const range = (start, end) => fetchChecked(fetcher, url, {
+    cache: 'no-store',
     headers: { Range: `bytes=${start}-${end - 1}` },
   });
   const readRange = (response, start, end) => {
@@ -67,10 +89,14 @@ async function readShard(shard, fetcher, advance) {
       }),
     ]);
   }
-  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
-  const hex = Array.from(hash, value => value.toString(16).padStart(2, '0')).join('');
-  if (hex !== shard.sha256) throw new Error(`权重校验失败（${shard.file}）`);
+  if (!await verified(bytes, shard)) throw new Error(`权重校验失败（${shard.file}）`);
+  const persisted = await saveResponse(cacheURL, new Response(bytes, {
+    headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(bytes.length) },
+  }));
+  return { bytes, saved: persisted };
+}
 
+function unpackShard(shard, bytes) {
   return Object.fromEntries(Object.entries(shard.tensors).map(([key, { kind, offset, shape, scaleOffset }]) => {
     const size = shape.reduce((product, dimension) => product * dimension, 1);
     const tensor = kind === 'float' ? new Float32Array(bytes.buffer, offset, size) : {
@@ -84,7 +110,7 @@ async function readShard(shard, fetcher, advance) {
 }
 
 export async function loadGPT2(progress = () => {}, fetcher = fetch) {
-  const manifest = await (await fetchChecked(fetcher, new URL('weights.json', MODEL_URL))).json();
+  const manifest = await modelJSON(new URL('weights.json', MODEL_URL), fetcher);
   if (manifest.format !== 'gpt2-row-int8-v1' || manifest.width !== WIDTH || manifest.depth !== LAYERS
       || manifest.heads !== HEADS || manifest.vocab !== VOCAB_SIZE || manifest.shards.length !== LAYERS + 1) {
     throw new Error('GPT‑2 权重配置不匹配');
@@ -92,21 +118,29 @@ export async function loadGPT2(progress = () => {}, fetcher = fetch) {
   let loaded = 0;
   let reported = 0;
   let nextShard = 0;
+  let downloaded = 0;
+  let restoredBytes = 0;
+  let persisted = true;
   const weights = {};
-  const advance = length => {
+  const advance = (length, local = false) => {
     loaded += length;
+    if (local) restoredBytes += length;
+    else downloaded += length;
     if (loaded - reported >= 512 * 1024 || loaded === manifest.totalBytes) {
       reported = loaded;
-      progress({ phase: 'download', loaded, total: manifest.totalBytes });
+      progress({ phase: local ? 'restore' : 'download', loaded, total: manifest.totalBytes, downloaded, restoredBytes });
     }
   };
   progress({ phase: 'download', loaded: 0, total: manifest.totalBytes });
   await Promise.all(Array.from({ length: 3 }, async () => {
     while (nextShard < manifest.shards.length) {
       const shard = manifest.shards[nextShard++];
-      Object.assign(weights, await readShard(shard, fetcher, advance));
+      const result = await readShard(shard, fetcher, advance, length => advance(length, true));
+      persisted = persisted && result.saved;
+      Object.assign(weights, unpackShard(shard, result.bytes));
     }
   }));
+  progress({ phase: 'ready', persisted, downloaded, restoredBytes });
   return new GPT2(weights);
 }
 

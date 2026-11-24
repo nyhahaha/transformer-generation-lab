@@ -6,7 +6,7 @@
 
 ## 本地运行
 
-按下文生成本地权重，在仓库根目录运行 `python -m http.server 8000`，再打开浏览器中的 `http://localhost:8000/`。点击「加载 GPT‑2」后，浏览器会下载约 128 MB 的权重并在后台线程执行推理。在线版所需权重由 GitHub Actions 构建并随 GitHub Pages 发布。
+按下文生成本地权重，在仓库根目录运行 `python -m http.server 8000`，再打开浏览器中的 `http://localhost:8000/`。首次点击「加载 GPT‑2」后，浏览器会下载约 128 MB 的权重并在后台线程执行推理。通过 SHA‑256 校验的完整分片保存在 Cache Storage 中，后续打开自动从本机恢复模型。部分下载会在下次加载时复用，损坏的分片会重新获取。清除网站数据或浏览器回收存储后，需要重新下载。在线版所需权重由 GitHub Actions 构建并随 GitHub Pages 发布。
 
 修改页面结构 `page.html` 或样式 `style.css` 后运行 `node build.mjs`，刷新根目录的 `index.html`。交互逻辑在 `app.js`，BPE 分词在 `gpt2-tokenizer.js`，前向计算在 `gpt2-runtime.js`。
 
