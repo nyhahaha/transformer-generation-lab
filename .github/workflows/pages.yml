@@ -53,7 +53,7 @@ jobs:
         run: |
           node build.mjs
           mkdir -p _site/gpt2
-          cp index.html app.js engine.js gpt2-tokenizer.js gpt2-runtime.js gpt2-worker.js _site/
+          cp index.html app.js flow.js engine.js gpt2-tokenizer.js gpt2-runtime.js gpt2-worker.js gpt2-cache.js _site/
           cp gpt2/LICENSE gpt2/tokenizer.json _site/gpt2/
           cp -r gpt2/q8-v1 _site/gpt2/
       - uses: actions/upload-pages-artifact@v4
